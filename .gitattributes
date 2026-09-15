@@ -1,0 +1,35 @@
+# ============================================================
+# 行尾符策略 —— 保证跨平台开箱即用
+# ============================================================
+# 背景：Windows 上 git 默认 core.autocrlf=true，会把文本文件转成 CRLF。
+# Shell 脚本带 CRLF 在 Linux 上会报 "\r: command not found" —— 必须强制 LF。
+
+# Shell 脚本：必须 LF（Linux 服务器执行）
+*.sh            text eol=lf
+init.sh         text eol=lf
+backup.sh       text eol=lf
+deploy-precheck.sh text eol=lf
+
+# Docker / 配置：LF
+Dockerfile      text eol=lf
+docker-compose.yml text eol=lf
+Caddyfile       text eol=lf
+*.conf          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Windows 批处理：必须 CRLF
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# 源码与文档：LF（Python 在 Windows 上也能正常读 LF）
+*.py            text eol=lf
+*.md            text eol=lf
+*.json          text eol=lf
+*.example       text eol=lf
+
+# 二进制
+*.png           binary
+*.jpg           binary
+*.pdf           binary
+*.tar.gz        binary

@@ -1,0 +1,35 @@
+# ============================================================
+# 私有数据与本地状态（严禁入库）
+# ============================================================
+
+# 知识库数据 —— 你的私人项目文档与向量索引
+kb-docs/
+chroma_data/
+backups/
+kb-docs-backup/
+
+# 敏感凭据
+.env
+.env.local
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# 运行时产物
+*.log
+kb-test-*/
