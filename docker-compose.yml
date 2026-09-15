@@ -41,11 +41,13 @@ services:
       - ${DATA_ROOT}/siyuan/workspace:/siyuan/workspace
     networks: [kb]
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:6806 || exit 1"]
+      # SiYuan 有锁屏密码保护：未认证请求返回 401，这属于【服务正常】的标志，
+      # 因此健康检查接受 200 与 401 两种响应（0=200/2xx, 8=401）
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:6806; c=$?; [ $c -eq 0 ] || [ $c -eq 8 ]"]
       interval: 60s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
   # ================================================================
   # ② AnythingLLM — RAG 问答

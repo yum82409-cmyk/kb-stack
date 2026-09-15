@@ -64,7 +64,14 @@ MAX_CTX_CHARS = 6000                     # 送入大模型的上下文硬上限�
 
 def normalize_ollama_host() -> str:
     """读环境变量 OLLAMA_HOST 并规范化；返回最终 host。
-    兼容只写 host 不写协议的写法；Windows 上 0.0.0.0 作为客户端目标不可达，替换为 127.0.0.1。"""
+
+    处理三种常见写法（Windows 上尤其容易踩）：
+      · 不带协议：      11434        → http://127.0.0.1:11434
+      · 监听地址当目标：0.0.0.0      → http://127.0.0.1:11434
+      · 缺端口：        0.0.0.0      → 补上 Ollama 默认端口 11434
+    注意：0.0.0.0 是"监听所有网卡"的写法，不是有效的客户端目标地址，
+    系统若设了 OLLAMA_HOST=0.0.0.0 会导致所有请求连接被拒。
+    """
     global OLLAMA_HOST
     env = os.environ.get("OLLAMA_HOST", "").strip()
     if not env:
@@ -74,6 +81,10 @@ def normalize_ollama_host() -> str:
     env = env.rstrip("/")
     if re.search(r"://0\.0\.0\.0", env):
         env = env.replace("0.0.0.0", "127.0.0.1")
+    # 补默认端口：剥掉协议后若无 ":" 说明只有主机名，补 11434
+    hostpart = re.sub(r"^https?://", "", env)
+    if ":" not in hostpart:
+        env = f"{env}:11434"
     OLLAMA_HOST = env
     return OLLAMA_HOST
 

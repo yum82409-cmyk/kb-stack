@@ -1,0 +1,60 @@
+####################################################################
+# docker-compose.local.yml —— 本地可视化调试覆盖层
+####################################################################
+# 用途：把 kb-stack 跑在自己的电脑上，用浏览器直接看板。
+#      主 compose 保持「零公网端口」安全基线不变，本文件只额外做两件事：
+#        1. 端口绑到 127.0.0.1（回环）—— 局域网/公网仍不可达
+#        2. 数据改用 Docker 命名卷 —— 规避 Windows NTFS 不支持 chmod 的问题
+#
+# 启动：
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d siyuan anythingllm
+# 停止（保留数据）：
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml stop
+#
+# 为什么必须用命名卷（实测踩坑，勿改回宿主路径）：
+#   Windows 上 `F:/kb-data` 是 NTFS 挂载，不支持 Unix chmod。
+#   SiYuan（Go）写 conf.json 时会调 chmod → 报 operation not permitted → 容器
+#   restart loop（退出码 26）。命名卷位于 Docker Desktop 的 Linux 虚拟磁盘内，
+#   原生支持 Unix 权限，彻底规避该问题。
+#   服务器部署（ext4/xfs）不需要本文件，直接用主 compose 的宿主路径挂载。
+#
+# 为什么 Ollama 用 host.docker.internal：
+#   本机 Ollama 是原生安装在 Windows 上（非容器），容器需经宿主网关访问。
+#   服务器上 Ollama 在 compose 内，用主 compose 的 http://ollama:11434 即可。
+####################################################################
+
+services:
+
+  siyuan:
+    ports:
+      - "127.0.0.1:6806:6806"
+    volumes:
+      # 命名卷替代主 compose 的 ${DATA_ROOT}/siyuan/workspace
+      - siyuan_ws:/siyuan/workspace
+
+  anythingllm:
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_PATH: http://host.docker.internal:11434
+      EMBEDDING_ENGINE: ollama
+      EMBEDDING_BASE_PATH: http://host.docker.internal:11434
+    volumes:
+      - anythingllm_storage:/app/server/storage
+      - anythingllm_hotdir:/app/collector/hotdir
+      - anythingllm_outputs:/app/collector/outputs
+      # 源码目录只读挂载（Windows 路径在 Docker Desktop 中可直接使用）
+      - "F:/Zcode Workplace:/data/repos:ro"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  siyuan_ws:
+    name: kb_siyuan_workspace
+  anythingllm_storage:
+    name: kb_anythingllm_storage
+  anythingllm_hotdir:
+    name: kb_anythingllm_hotdir
+  anythingllm_outputs:
+    name: kb_anythingllm_outputs

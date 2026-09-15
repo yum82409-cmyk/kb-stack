@@ -8,6 +8,9 @@ chroma_data/
 backups/
 kb-docs-backup/
 
+# 本地部署运行时数据（Docker 卷的宿主挂载点）
+kb-data/
+
 # 敏感凭据
 .env
 .env.local
