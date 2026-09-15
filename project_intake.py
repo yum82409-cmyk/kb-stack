@@ -14,8 +14,14 @@ project_intake.py —— 半成品项目知识库录入生成器
   - 汇总 INDEX.md 索引（表格 + 状态统计），可直接导入 SiYuan / AnythingLLM
 
 用法：
-    py project_intake.py <工程根目录> [-o 输出目录] [--author 名字] [--open]
+    py project_intake.py <工程根目录> [<更多根目录>...] [-o 输出目录] [--author 名字]
     py project_intake.py ./my-projects -o ./kb-docs --author "Your Name"
+
+    # 多目录（原生支持，无需符号链接）：
+    py project_intake.py "F:\\Zcode Workplace" "D:\\STM32小车二次开发" -o ./kb-docs
+
+    # 不传路径时自动读 .env 的 REPOS_DIRS（逗号分隔），再退回脚本同级目录
+    py project_intake.py -o ./kb-docs
 
 无第三方依赖，仅用标准库。Windows/Linux 通用。
 """
@@ -25,6 +31,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +40,10 @@ from pathlib import Path
 # ---------------------------------------------------------------
 # 配置区
 # ---------------------------------------------------------------
+
+# 默认扫描深度：1 = 只看根目录的一级子目录（保持原有行为）
+#                 2 = 再下探一层（适配 D:\工作区\01-工程\<各Keil工程> 这类两层结构）
+DEFAULT_DEPTH = 1
 
 # 扫描时跳过的目录名（工具缓存、虚拟环境、IDE 垃圾）
 SKIP_DIRS = {
@@ -68,14 +79,135 @@ def is_skip_dir(name: str) -> bool:
     return any(fnmatch(name, pat) for pat in SKIP_DIRS)
 
 
-def find_projects(root: Path) -> list[Path]:
-    """一级子目录中，含代码/文档特征的视为项目；返回[根目录]代表根本身也是项目"""
-    projects = []
-    for child in sorted(root.iterdir()):
-        if not child.is_dir() or is_skip_dir(child.name) or child.name.startswith("."):
-            continue
-        if looks_like_project(child):
-            projects.append(child)
+# ---------------------------------------------------------------
+# 多根目录配置解析（.env / 常量 / 命令行，三级优先级）
+# ---------------------------------------------------------------
+
+def parse_dotenv(env_path: Path) -> dict[str, str]:
+    """极简 .env 解析：KEY=VALUE，忽略注释与空行，去除成对引号。
+    不引入 python-dotenv 依赖（保持零第三方依赖）。"""
+    result: dict[str, str] = {}
+    if not env_path.is_file():
+        return result
+    try:
+        for raw in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip()
+            # 去掉行尾注释（值里含 # 的路径罕见，仅在 # 前有空格时才截断）
+            if " #" in val:
+                val = val.split(" #", 1)[0].strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                val = val[1:-1]
+            if key:
+                result[key] = val
+    except OSError:
+        pass
+    return result
+
+
+def split_paths(raw: str) -> list[str]:
+    """按逗号/分号切分路径列表（兼容中英文标点），逐个 strip。
+    Windows 盘符里的冒号不受影响（只切逗号与分号）。"""
+    if not raw:
+        return []
+    parts = re.split(r"[,;，；]", raw)
+    return [p.strip().strip("\"'") for p in parts if p.strip()]
+
+
+def resolve_roots(cli_roots: list[str], script_dir: Path) -> tuple[list[Path], str]:
+    """确定要扫描的根目录列表，返回 (roots, 来源说明)。
+
+    优先级：
+      1. 命令行传入的路径（可多个）
+      2. .env 的 REPOS_DIRS（逗号分隔）
+      3. 脚本同级目录（保持单人单目录场景开箱即用）
+    """
+    if cli_roots:
+        candidates, source = cli_roots, "命令行参数"
+    else:
+        env_path = script_dir / ".env"
+        env = parse_dotenv(env_path)
+        raw = env.get("REPOS_DIRS") or env.get("REPOS_DIR") or ""
+        candidates = split_paths(raw)
+        if candidates:
+            source = f".env ({env_path.name} 的 REPOS_DIRS)"
+        else:
+            candidates, source = [str(script_dir)], "脚本同级目录（未配置 REPOS_DIRS）"
+
+    roots: list[Path] = []
+    for c in candidates:
+        p = Path(c).expanduser()
+        try:
+            p = p.resolve()
+        except OSError:
+            pass
+        if p.is_dir():
+            if p not in roots:          # 去重（同一路径写两次只扫一次）
+                roots.append(p)
+        else:
+            print(f"  [跳过] 目录不存在：{p}")
+    return roots, source
+
+
+def has_direct_markers(d: Path) -> bool:
+    """目录内【直接】含项目标志：依赖文件 / README / .git / 直接躺着的源码。
+    这是「这是一个工程」的强信号，不靠下探猜测。"""
+    try:
+        entries = list(d.iterdir())
+    except (PermissionError, OSError):
+        return False
+    names = {e.name for e in entries}
+    if any(n in names for n in DEPENDENCY_FILES) or "README.md" in names or ".git" in names:
+        return True
+    return any(e.is_file() and e.suffix.lower() in CODE_EXTS for e in entries)
+
+
+def has_code_below(d: Path) -> bool:
+    """目录的【下一层】是否有源码（弱信号：说明它可能是工程，也可能是分组目录）"""
+    try:
+        for e in d.iterdir():
+            if e.is_dir() and not is_skip_dir(e.name) and not e.name.startswith("."):
+                if any(f.is_file() and f.suffix.lower() in CODE_EXTS
+                       for f in e.iterdir()):
+                    return True
+    except (PermissionError, OSError):
+        pass
+    return False
+
+
+def find_projects(root: Path, depth: int = DEFAULT_DEPTH) -> list[Path]:
+    """在 root 下查找项目目录（root 自身不算项目，只扫其子目录）。
+
+    判定规则（解决"工作区根目录被误判为项目"的问题）：
+      · 子目录含【直接标志】（依赖文件/README/.git/直接源码）→ 判定为项目；
+      · 否则若还有深度余量 → 视为分组目录继续下探
+        （适配 D:\\工作区\\01-工程\\<各Keil工程> 两层结构）；
+      · 深度用尽但下一层有源码 → 仍收录，避免漏掉浅层工程。
+
+    depth=1：只看一级子目录（与原行为一致）
+    depth=2：再下探一层分组目录
+    """
+    projects: list[Path] = []
+
+    def scan(parent: Path, level: int) -> None:
+        try:
+            children = sorted(parent.iterdir())
+        except (PermissionError, OSError):
+            return
+        for child in children:
+            if not child.is_dir() or is_skip_dir(child.name) or child.name.startswith("."):
+                continue
+            if has_direct_markers(child):
+                projects.append(child)              # 强信号：就是工程
+            elif level < depth:
+                scan(child, level + 1)              # 分组目录：继续下探
+            elif has_code_below(child):
+                projects.append(child)              # 深度用尽：收录浅层工程
+
+    scan(root, 1)
     return projects
 
 
@@ -339,17 +471,25 @@ def detect_tech_hint(proj: Path) -> str:
     return "、".join(langs) if langs else "未知（无代码文件）"
 
 
-def generate_doc(proj: Path, author: str) -> tuple[str, dict]:
-    """为单个项目生成复盘文档；返回 (markdown, 元信息dict用于INDEX)"""
+def generate_doc(proj: Path, author: str, source_root: Path | None = None,
+                 out_path: Path | None = None) -> tuple[str, dict]:
+    """为单个项目生成复盘文档；返回 (markdown, 元信息dict用于INDEX)
+
+    source_root：该项目来自哪个扫描根目录（多根模式下写入附录，便于溯源）。
+    out_path   ：目标文件路径。若已存在且含已填写内容，则【保留人工/AI 填写区】，
+                 仅刷新第 5 节附录 —— 避免重跑流水线时冲掉既有成果。
+    """
     meta = {
         "name": proj.name,
         "path": str(proj),
         "last_active": file_mtime(proj),
         "tech": detect_tech_hint(proj),
+        "source_root": str(source_root) if source_root else str(proj.parent),
     }
 
     auto_lines = [
         f"项目目录：{proj}",
+        f"来源扫描根：{meta['source_root']}",
         f"最后活跃（文件 mtime）：{meta['last_active']}",
         f"检测到的语言：{meta['tech']}",
         "",
@@ -364,6 +504,18 @@ def generate_doc(proj: Path, author: str) -> tuple[str, dict]:
     ]
     auto_section = "\n".join(auto_lines)
 
+    # ---- 增量保护：已有文档且含填写内容 → 只换附录，保留 §1-§4 ----
+    if out_path and out_path.is_file():
+        try:
+            existing = out_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            existing = ""
+        if existing and has_user_content(existing):
+            refreshed = replace_appendix(existing, auto_section)
+            if refreshed is not None:
+                meta["preserved"] = True
+                return refreshed, meta
+
     # 基于模板填充（模板含 {{占位符}}；附录整体替换）
     template = TEMPLATE_PATH.read_text(encoding="utf-8") if TEMPLATE_PATH.exists() else "{{AUTO_GENERATED_SECTION}}"
     today = dt.date.today().isoformat()
@@ -376,8 +528,41 @@ def generate_doc(proj: Path, author: str) -> tuple[str, dict]:
     return doc, meta
 
 
-def generate_index(docs: list[tuple[str, dict]], out_dir: Path) -> str:
-    """汇总索引：总览表 + 状态填写区"""
+# 附录起点标志（模板第 5 节标题）
+APPENDIX_MARKER = "## 5. 附录：自动抓取的原始信息"
+
+
+def has_user_content(doc: str) -> bool:
+    """判断文档是否已有【人工/AI 已填写】的核心内容。
+
+    判据只看 AI/人工真正会填的两处，忽略 §1 元数据区那些"本就留白待填"的占位符
+    （如 {{YYYY-MM}}、{{这个项目是干什么的}} —— 它们长期存在属正常）：
+      · §2.1 整体状态：是否还是模板默认的 {{半成品-搁置}}
+      · §4.2 破局四问：是否还是模板默认的 {{当时的障碍是客观的...}}
+    任一已被替换 → 视为已填写，重跑时保留主体、只刷新附录。
+    """
+    return ("{{半成品-搁置}}" not in doc) or ("{{当时的障碍是客观的" not in doc)
+
+
+def replace_appendix(doc: str, auto_section: str) -> str | None:
+    """只替换第 5 节附录的 text 代码块内容，保留其余章节。
+    找不到附录结构时返回 None（调用方回退到全量重建）。"""
+    idx = doc.find(APPENDIX_MARKER)
+    if idx < 0:
+        return None
+    head = doc[:idx]
+    tail = doc[idx:]
+    # 替换附录内 ```text ... ``` 的内容（取第一个代码块）
+    m = re.search(r"```(?:text)?\n(.*?)\n```", tail, re.S)
+    if not m:
+        return None
+    new_tail = tail[:m.start(1)] + auto_section + tail[m.end(1):]
+    return head + new_tail
+
+
+def generate_index(docs: list[tuple[str, dict]], out_dir: Path,
+                   roots: list[Path] | None = None) -> str:
+    """汇总索引：总览表 + 状态填写区 + 扫描来源说明"""
     today = dt.date.today().isoformat()
     lines = [
         "# 半成品项目知识库 · 总索引",
@@ -385,15 +570,24 @@ def generate_index(docs: list[tuple[str, dict]], out_dir: Path) -> str:
         f"> 生成日期：{today}　项目数：{len(docs)}　",
         "> 由 `project_intake.py` 自动生成；「状态/一句话定位」需人工填写。",
         "",
+    ]
+    # 多根模式：列出所有扫描来源，便于溯源
+    if roots:
+        lines += ["**扫描来源**：", ""]
+        lines += [f"- `{r}`" for r in roots]
+        lines.append("")
+
+    lines += [
         "## 项目总览",
         "",
-        "| # | 项目 | 状态 | 一句话定位 | 技术栈 | 最后活跃 | 文档 |",
-        "|---|---|---|---|---|---|---|",
+        "| # | 项目 | 状态 | 一句话定位 | 技术栈 | 最后活跃 | 来源 | 文档 |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for i, (_, m) in enumerate(docs, 1):
+        src = Path(m.get("source_root", "")).name or "-"
         lines.append(
             f"| {i} | {m['name']} | ☐待填 | 待填 | {m['tech']} | "
-            f"{m['last_active']} | [{m['name']}.md]({m['name']}.md) |"
+            f"{m['last_active']} | {src} | [{m['name']}.md]({m['name']}.md) |"
         )
     lines += [
         "",
@@ -421,41 +615,79 @@ def generate_index(docs: list[tuple[str, dict]], out_dir: Path) -> str:
 # ---------------------------------------------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="半成品项目知识库录入生成器")
-    ap.add_argument("root", help="工程根目录（其一级子目录被视为项目）")
+    ap = argparse.ArgumentParser(
+        description="半成品项目知识库录入生成器（支持多根目录）",
+        epilog="不传 root 时自动读取 .env 的 REPOS_DIRS（逗号分隔），再退回脚本同级目录。")
+    ap.add_argument("root", nargs="*",
+                    help="工程根目录，可传多个；也可用 .env 的 REPOS_DIRS 配置")
     ap.add_argument("-o", "--out", default="./kb-docs", help="输出目录（默认 ./kb-docs）")
     ap.add_argument("--author", default="我", help="录入人名字（默认「我」）")
+    ap.add_argument("--depth", type=int, default=DEFAULT_DEPTH,
+                    help=f"扫描深度：1=仅一级子目录（默认），2=再下探一层分组目录")
     ap.add_argument("--open", action="store_true", help="生成后用资源管理器打开输出目录")
     args = ap.parse_args()
 
-    root = Path(args.root).expanduser().resolve()
-    if not root.is_dir():
-        print(f"[错误] 目录不存在：{root}")
-        return 1
+    script_dir = Path(__file__).resolve().parent
     if not TEMPLATE_PATH.exists():
         print(f"[错误] 未找到模板：{TEMPLATE_PATH}（应与脚本同目录的 templates/ 下）")
         return 2
 
+    # ---- 解析扫描根目录（命令行 > .env REPOS_DIRS > 脚本同级目录）----
+    roots, source = resolve_roots(args.root, script_dir)
+    if not roots:
+        print("[错误] 没有可扫描的目录。请传路径参数，或在 .env 配置 REPOS_DIRS。")
+        return 1
+    print(f"扫描来源（{source}）：")
+    for r in roots:
+        print(f"  · {r}")
+    print()
+
     out_dir = Path(args.out).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    projects = find_projects(root)
-    if not projects:
-        print(f"[提示] {root} 下没有识别出项目目录（无代码/README/依赖文件特征）")
+    # ---- 外层循环：逐个根目录扫描，统一收集（含重名去重）----
+    docs_meta: list[tuple[str, dict]] = []
+    used_names: dict[str, int] = {}      # 文件名 → 已用次数（重名时加来源后缀）
+    total_found = 0
+
+    for root in roots:
+        projects = find_projects(root, depth=args.depth)
+        if not projects:
+            print(f"[提示] {root} 下没有识别出项目目录，跳过。")
+            continue
+        print(f"== {root} → 识别出 {len(projects)} 个项目 ==")
+        for proj in projects:
+            total_found += 1
+
+            # 重名处理：不同根目录下同名项目 → 文件名加来源目录名后缀
+            stem = proj.name
+            if stem in used_names:
+                used_names[stem] += 1
+                stem = f"{proj.name}（{root.name}）"
+            else:
+                used_names[stem] = 1
+
+            out_path = out_dir / f"{stem}.md"
+            doc, meta = generate_doc(proj, args.author, source_root=root,
+                                     out_path=out_path)
+            if stem != proj.name:
+                meta["name"] = stem
+                doc = doc.replace(f"# {proj.name} ——", f"# {stem} ——", 1)
+
+            out_path.write_text(doc, encoding="utf-8")
+            docs_meta.append((f"{stem}.md", meta))
+            tag = "（已保留填写内容，仅刷新附录）" if meta.get("preserved") else ""
+            print(f"  → {stem} ... OK{tag}")
+
+    if not docs_meta:
+        print(f"\n[提示] 所有根目录下均未识别出项目（无代码/README/依赖文件特征）。")
         return 0
 
-    print(f"识别出 {len(projects)} 个项目目录：")
-    docs_meta: list[tuple[str, dict]] = []
-    for proj in projects:
-        print(f"  → {proj.name} ...", end=" ", flush=True)
-        doc, meta = generate_doc(proj, args.author)
-        (out_dir / f"{proj.name}.md").write_text(doc, encoding="utf-8")
-        docs_meta.append((f"{proj.name}.md", meta))
-        print("OK")
-
-    index_md = generate_index(docs_meta, out_dir)
+    index_md = generate_index(docs_meta, out_dir, roots=roots)
     (out_dir / "INDEX.md").write_text(index_md, encoding="utf-8")
     print(f"\n完成：{len(docs_meta)} 份复盘文档 + INDEX.md → {out_dir}")
+    if total_found != len(docs_meta):
+        print(f"（重名合并：{total_found} 个项目中 {total_found - len(docs_meta)} 个因同名已加后缀区分）")
 
     if args.open:
         import webbrowser

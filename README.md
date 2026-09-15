@@ -110,7 +110,14 @@ pip install requests chromadb mcp
 
 ```bash
 # Scan a directory of projects → generate one Markdown report per project
+# Single root
 python project_intake.py /path/to/your/projects -o ./kb-docs --author "Your Name"
+
+# Multiple roots (native support — no symlinks needed):
+python project_intake.py /path/a /path/b -o ./kb-docs --depth 2
+
+# Or configure REPOS_DIRS in .env and just run:
+python project_intake.py -o ./kb-docs
 
 # Let the local LLM read core sources and fill in status + next-step strategy
 python auto_fill_docs.py --docs-dir ./kb-docs
@@ -163,7 +170,7 @@ See [deployment-tunnels.md](deployment-tunnels.md) for the Cloudflare vs Tailsca
 
 ```
 kb-stack/
-├── project_intake.py        # scan projects → Markdown report skeletons
+├── project_intake.py        # scan projects (multi-root via REPOS_DIRS) → report skeletons
 ├── auto_fill_docs.py        # local LLM fills status & strategy sections
 ├── kb_rag.py                # RAG engine: chunk · embed · index · query
 ├── mcp_server.py            # MCP stdio server (2 tools, stdout-hardened)
@@ -224,7 +231,14 @@ git clone https://github.com/<your-username>/kb-stack.git
 cd kb-stack && pip install requests chromadb mcp
 
 # 2. 扫描项目生成复盘文档（含 AI 自动填写状态与破局思路）
+# Single root
 python project_intake.py /path/to/your/projects -o ./kb-docs --author "Your Name"
+
+# Multiple roots (native support — no symlinks needed):
+python project_intake.py /path/a /path/b -o ./kb-docs --depth 2
+
+# Or configure REPOS_DIRS in .env and just run:
+python project_intake.py -o ./kb-docs
 python auto_fill_docs.py --docs-dir ./kb-docs
 
 # 3. 建立向量索引
