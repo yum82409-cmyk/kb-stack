@@ -1,0 +1,191 @@
+####################################################################
+# 个人知识库系统 — 零公网端口版（安全隧道架构）
+# SiYuan + AnythingLLM + Ollama + Cloudflare Tunnel + Tailscale(可选)
+####################################################################
+# 安全模型：
+#   · 全栈无任何 ports: 映射 —— 宿主机 0 个对外监听端口
+#     （唯一例外见 tailscale 服务的 cap_add/网络模式说明，不是端口开放）
+#   · 对外访问只走两条隧道（按需启用，可都开）：
+#       1) cloudflared：域名访问（家人/同事临时用，带 Cloudflare Access 门禁）
+#       2) tailscale： 私有组网（自己日常用，WireGuard 加密直连）
+#   · Ollama 仅容器网络内可达，AI 推理能力无法被公网滥用
+#
+# 用法：
+#   cp .env.example .env && vim .env
+#   docker compose up -d            # 起业务栈（无隧道）
+#   docker compose --profile cf  up -d   # 加启 Cloudflare Tunnel
+#   docker compose --profile ts  up -d   # 加启 Tailscale（首次需看日志拿登录链接）
+####################################################################
+
+x-common-env: &common-env
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+
+services:
+
+  # ================================================================
+  # ① SiYuan 思源笔记 — 知识库主入口
+  # 端口 6806 只在 kb 网络内有效，由隧道容器反代进来
+  # ================================================================
+  siyuan:
+    image: b3log/siyuan:v3.8.3        # 2026-09-07 稳定版（锁版本：防止 latest 漂移）
+    container_name: siyuan
+    restart: unless-stopped
+    command:
+      - serve
+      - --workspace=/siyuan/workspace
+      - --accessAuthCode=${SIYUAN_ACCESS_AUTH_CODE}
+    environment:
+      <<: *common-env
+    volumes:
+      - ${DATA_ROOT}/siyuan/workspace:/siyuan/workspace
+    networks: [kb]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:6806 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ================================================================
+  # ② AnythingLLM — RAG 问答
+  # 端口 3001 只在 kb 网络内有效
+  # ================================================================
+  anythingllm:
+    image: mintplexlabs/anythingllm:1.16.1   # 2026-08-27 稳定版（锁版本）
+    container_name: anythingllm
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      STORAGE_DIR: ${STORAGE_DIR}
+      SERVER_PORT: ${SERVER_PORT}
+      SIG_KEY: ${SIG_KEY}
+      SIG_SALT: ${SIG_SALT}
+      AUTH_TOKEN: ${AUTH_TOKEN:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_EXPIRY: ${JWT_EXPIRY:-30d}
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      OLLAMA_BASE_PATH: ${OLLAMA_BASE_PATH}
+      OLLAMA_MODEL_PREF: ${OLLAMA_MODEL_PREF}
+      OLLAMA_MODEL_TOKEN_LIMIT: ${OLLAMA_MODEL_TOKEN_LIMIT}
+      OLLAMA_RESPONSE_TIMEOUT: ${OLLAMA_RESPONSE_TIMEOUT:-7200000}
+      EMBEDDING_ENGINE: ${EMBEDDING_ENGINE}
+      EMBEDDING_BASE_PATH: ${EMBEDDING_BASE_PATH}
+      EMBEDDING_MODEL_PREF: ${EMBEDDING_MODEL_PREF}
+      EMBEDDING_MODEL_MAX_CHUNK_LENGTH: ${EMBEDDING_MODEL_MAX_CHUNK_LENGTH:-8192}
+      VECTOR_DB: ${VECTOR_DB:-lancedb}
+    volumes:
+      - ${DATA_ROOT}/anythingllm/storage:/app/server/storage
+      - ${DATA_ROOT}/anythingllm/hotdir:/app/collector/hotdir
+      - ${DATA_ROOT}/anythingllm/outputs:/app/collector/outputs
+      - ${REPOS_DIR}:/data/repos:ro
+    networks: [kb]
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:3001/api/ping || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ================================================================
+  # ③ Ollama — 本地大模型推理
+  # 无端口映射（原版就没映射，本版继续保持）—— 仅 kb 网络内可达
+  # ================================================================
+  ollama:
+    image: ollama/ollama:0.34.0        # 2026-09-09 稳定版（锁版本；AMD 显卡改用 0.34.0-rocm）
+    container_name: ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+    volumes:
+      - ${DATA_ROOT}/ollama:/root/.ollama
+    networks: [kb]
+    # 有 NVIDIA GPU 时取消注释（需 nvidia-container-toolkit）
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # ================================================================
+  # ④ caddy — 栈内统一 TLS 反代（【不监听宿主机端口】）
+  # 改造说明：原版映射 80/443 以便 ACME 签发；零端口版改为
+  #   · 云端 TLS 由 Cloudflare 边缘终结（隧道方案自带 HTTPS），
+  #     caddy 在内网侧做纯 HTTP 分流 + WebSocket/SSE 透传
+  #   · Tailscale 路径同样反代 caddy:80（Tailscale 自带 WireGuard 加密）
+  #   · 因为不再需要公网证书，Caddyfile 用 :80 站点即可（见下方注释）
+  # ================================================================
+  caddy:
+    image: caddy:2.11.4-alpine         # 2026-09-10 稳定版（锁版本）
+    container_name: caddy
+    restart: unless-stopped
+    # 无 ports —— caddy 只在 kb 网络内监听 80，由隧道容器把流量送进来
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${DATA_ROOT}/caddy/data:/data
+      - ${DATA_ROOT}/caddy/config:/config
+    networks: [kb]
+    depends_on:
+      - siyuan
+      - anythingllm
+
+  # ================================================================
+  # ⑤ cloudflared — Cloudflare Tunnel（profile: cf，按需启用）
+  # 出站隧道：容器主动外连 Cloudflare 边缘，宿主机不开任何入站端口。
+  # 流量路径： 用户 → CF 边缘(TLS终结+Access门禁) → 隧道 → caddy:80 → 各业务
+  # 域名路由在 Cloudflare 面板配置（见 deployment-tunnels.md 第二节），
+  # 都指向 http://caddy:80，由 Caddyfile 按 Host 分流。
+  # ================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:2026.9.1   # 2026-09-11 稳定版（锁版本）
+    container_name: cloudflared
+    restart: unless-stopped
+    profiles: [cf]
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TOKEN}
+    networks: [kb]
+    depends_on:
+      - caddy
+
+  # ================================================================
+  # ⑥ tailscale — Tailscale 子网路由/出口节点（profile: ts，按需启用）
+  # 出站隧道：WireGuard 加密，P2P 直连（打洞失败时走 DERP 中继）。
+  # 注意两处网络设计：
+  #   · network_mode: host —— tailscaled 需要操作宿主机路由表来通告
+  #     子网路由/出口节点，host 网络是官方要求（这不是开端口，
+  #     Tailscale 不监听任何公网入站端口，连接由出站打洞建立）
+  #   · 同时加入 kb 网络 —— 让它能直连 caddy 做反向代理入口
+  # TS_DEST_IP 把本容器配置成「单目标代理」：tailnet 内访问本节点
+  # 的 443/80 端口时，流量被透明转发到 caddy:80。
+  # ================================================================
+  tailscale:
+    image: tailscale/tailscale:v1.102.3   # 2026-08-20 stable（锁版本；unstable 勿用于生产）
+    container_name: tailscale
+    restart: unless-stopped
+    profiles: [ts]
+    hostname: ${TS_HOSTNAME:-kb-server}
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}            # 留空则首次从日志拿登录 URL
+      TS_STATE_DIR: /var/lib/tailscale       # 状态持久化，重启不丢登录态
+      TS_DEST_IP: caddy                      # 收到的流量全部转给 caddy
+      TS_ROUTES: ${TS_ROUTES:-}              # 可选：通告的子网路由（见部署文档）
+      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:---advertise-exit-node}
+      TS_ACCEPT_DNS: "false"
+    volumes:
+      - ${DATA_ROOT}/tailscale:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    network_mode: host        # 通告子网/出口节点必须；仍无任何公网入站端口
+    # 注：host 模式下无法再 attach kb 网络；若需要容器名直连 caddy，
+    # 用宿主机网桥 IP（部署文档 4.3 节）或保持 TS_DEST_IP=caddy 的
+    # 单目标代理模式（默认，够用且最简单）。
+
+networks:
+  kb:
+    driver: bridge
+    name: kb

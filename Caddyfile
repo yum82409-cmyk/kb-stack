@@ -1,0 +1,74 @@
+# ============================================================
+# Caddyfile — 零公网端口版（配合隧道架构，已重写）
+# 变更说明：
+#   旧版：监听 80/443 + ACME 自动签发公网证书（需要公网 IP）
+#   新版：TLS 交给隧道层——Cloudflare 边缘终结（自带 HTTPS），
+#         Tailscale 自带 WireGuard 加密。Caddy 只做内网 HTTP 分流，
+#         不再需要证书，也就不需要开放 80/443 给公网。
+#
+# 监听设计（都在容器网络内，宿主机无端口映射）：
+#   :80   — 按 Host 分流，服务 Cloudflare Tunnel 路径
+#           （CF 边缘把原始 Host 头透传过来）
+#   :8080 — SiYuan 直达   （Tailscale 路径用，免去 Host 依赖）
+#   :8081 — AnythingLLM 直达（同上）
+# ============================================================
+
+# ---------- 路径一：Cloudflare Tunnel（域名访问） ----------
+http://kb.example.com {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+	# WebSocket：SiYuan 界面同步依赖
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	reverse_proxy @websocket siyuan:6806
+	reverse_proxy siyuan:6806
+	log {
+		output file /data/access-kb.log
+	}
+}
+
+http://rag.example.com {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+	request_body {
+		max_size 512MB
+	}
+	reverse_proxy anythingllm:3001 {
+		# 本地模型长回答：放宽超时 + 关闭流缓冲（SSE 流式必须）
+		transport http {
+			response_header_timeout 600s
+		}
+		flush_interval -1
+	}
+	log {
+		output file /data/access-rag.log
+	}
+}
+
+# ---------- 路径二：Tailscale（IP:端口 直达，无需域名/Host 头） ----------
+:8080 {
+	reverse_proxy siyuan:6806
+}
+
+:8081 {
+	request_body {
+		max_size 512MB
+	}
+	reverse_proxy anythingllm:3001 {
+		transport http {
+			response_header_timeout 600s
+		}
+		flush_interval -1
+	}
+}
