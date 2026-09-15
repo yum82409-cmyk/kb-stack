@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "MCP 接入配置模板 —— 复制到 VS Code / Cursor 的 MCP 配置中",
+    "",
+    "安装位置：",
+    "  · VS Code (Cline): 命令面板 → 'Cline: Open MCP Settings'",
+    "  · VS Code (原生 1.99+): settings.json 的 mcp.servers 键",
+    "  · Cursor: Settings → MCP → Add Server，或 ~/.cursor/mcp.json",
+    "",
+    "必改项（三处）：",
+    "  1. command  → 你的 Python 解释器绝对路径",
+    "     获取方式: python -c \"import sys; print(sys.executable)\"",
+    "     Windows 路径需双反斜杠转义: C:\\\\Python311\\\\python.exe",
+    "  2. args[0]  → 本仓库中 mcp_server.py 的绝对路径",
+    "  3. env.OLLAMA_HOST → 你的 Ollama 地址（默认 127.0.0.1:11434）"
+  ],
+
+  "mcpServers": {
+    "kb-rag": {
+      "command": "<ABSOLUTE_PATH_TO_YOUR_PYTHON>",
+      "args": [
+        "<ABSOLUTE_PATH_TO_REPO>/mcp_server.py"
+      ],
+      "env": {
+        "OLLAMA_HOST": "127.0.0.1:11434",
+        "PYTHONIOENCODING": "utf-8"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
