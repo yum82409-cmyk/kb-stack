@@ -11,6 +11,10 @@ kb-docs-backup/
 # 本地部署运行时数据（Docker 卷的宿主挂载点）
 kb-data/
 
+# 静态构建产物（每次 build_static.py 重新生成）
+dist/
+public/
+
 # 敏感凭据
 .env
 .env.local

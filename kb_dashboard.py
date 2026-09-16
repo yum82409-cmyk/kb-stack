@@ -299,12 +299,16 @@ PAGE = """<!DOCTYPE html>
 
 <script>
 const PROJECTS = __DATA__;
-const BADGE = { '成品':'b-done', '可演示':'b-done', '半成品-活跃':'b-active',
-                '半成品-搁置':'b-shelf', '想法验证':'b-shelf', '已废弃':'b-none',
-                '半成品':'b-active', '未填写':'b-none' };
+// 状态 → 徽章样式映射。【精确优先 + 长键在前】：
+// "半成品-活跃"含"成品"二字，若"成品"排在前面做包含匹配会误染绿色
+const BADGE = { '半成品-活跃':'b-active', '半成品-搁置':'b-shelf', '想法验证':'b-shelf',
+                '已废弃':'b-none', '未填写':'b-none', '半成品':'b-active',
+                '成品':'b-done', '可演示':'b-done' };
 
 function badgeClass(s) {
-  for (const k in BADGE) if (s.indexOf(k) >= 0) return BADGE[k];
+  if (BADGE[s]) return BADGE[s];                 // 精确命中
+  const keys = Object.keys(BADGE).sort((a, b) => b.length - a.length);
+  for (const k of keys) if (s.indexOf(k) >= 0) return BADGE[k];  // 长键优先
   return 'b-none';
 }
 function esc(s) {

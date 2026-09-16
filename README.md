@@ -174,6 +174,8 @@ kb-stack/
 ├── auto_fill_docs.py        # local LLM fills status & strategy sections
 ├── kb_rag.py                # RAG engine: chunk · embed · index · query
 ├── mcp_server.py            # MCP stdio server (2 tools, stdout-hardened)
+├── kb_dashboard.py          # zero-dependency browser dashboard (local)
+├── build_static.py         # build static site for hosting platforms
 ├── templates/               # project report template
 ├── docker-compose.yml       # 6-service stack, version-pinned, zero ports
 ├── deploy-precheck.sh       # pre-deployment environment audit
