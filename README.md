@@ -247,12 +247,19 @@ python kb_rag.py index ./kb-docs --collection kb-projects
 # 4. 提问
 python kb_rag.py ask "OCR 项目现在什么进度？"
 
-# 5. 接入编辑器（可选）：复制 mcp-config-template.json，替换两个占位符
+# 5. 启动本地看板与只读项目 API
+python kb_dashboard.py --port 8765
+# GET http://127.0.0.1:8765/api/projects
+# 可用 KB_DASHBOARD_CORS_ORIGIN 或 --cors-origin 限制允许的前端来源
+
+# 6. 接入编辑器（可选）：复制 mcp-config-template.json，替换两个占位符
 #    详见 MCP_SETUP.md
 
-# 6. 完整服务器栈（可选，零公网端口）
+# 7. 完整服务器栈（可选，零公网端口）
 bash deploy-precheck.sh /srv/kb && cp .env.example .env && sudo bash init.sh
 ```
+
+`GET /api/projects` 返回项目名称、状态、更新时间、摘要、技术栈、TODO 与统计数据。响应默认包含 `Access-Control-Allow-Origin: *`，供静态前端读取；生产环境可将来源收紧为 `https://blog.liuguangzhong.top`。
 
 ### 实测踩坑记录
 

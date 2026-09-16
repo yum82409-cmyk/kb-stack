@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
 import urllib.parse
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -33,6 +35,7 @@ KB_DOCS = SCRIPT_DIR / "kb-docs"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 ENABLE_AI = True
+CORS_ORIGIN = "*"
 
 
 # ---------------------------------------------------------------
@@ -132,6 +135,32 @@ def load_projects() -> list[dict]:
     # 排序：有状态的优先，其次按最后活跃倒序
     projects.sort(key=lambda p: (p["status"] == "未填写", p["last_active"]), reverse=False)
     return projects
+
+
+def projects_api_payload() -> dict:
+    """返回稳定的公开 API 结构，避免前端依赖看板内部字段。"""
+    projects = []
+    for item in load_projects():
+        projects.append({
+            "name": item["title"],
+            "status": item["status"],
+            "updated_at": item["last_active"],
+            "summary": item["summary"],
+            "usability": item["usability"],
+            "source": item["source"],
+            "tech": item["tech"],
+            "todos": item["todos"],
+            "metrics": {
+                "done": item["done"],
+                "missing": item["missing"],
+                "pending_todos": sum(not todo["done"] for todo in item["todos"]),
+            },
+        })
+    return {
+        "projects": projects,
+        "count": len(projects),
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
 
 
 # ---------------------------------------------------------------
@@ -333,13 +362,26 @@ render();
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str, *, cors: bool = False) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
+            self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            if CORS_ORIGIN != "*":
+                self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_OPTIONS(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        if path != "/api/projects":
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        self._send(204, b"", "text/plain; charset=utf-8", cors=True)
 
     def do_GET(self) -> None:
         path = urllib.parse.urlparse(self.path).path
@@ -347,8 +389,8 @@ class Handler(BaseHTTPRequestHandler):
             data = PAGE.replace("__DATA__", json.dumps(load_projects(), ensure_ascii=False))
             self._send(200, data.encode("utf-8"), "text/html; charset=utf-8")
         elif path == "/api/projects":
-            self._send(200, json.dumps(load_projects(), ensure_ascii=False).encode("utf-8"),
-                       "application/json; charset=utf-8")
+            body = json.dumps(projects_api_payload(), ensure_ascii=False).encode("utf-8")
+            self._send(200, body, "application/json; charset=utf-8", cors=True)
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
@@ -378,13 +420,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    global ENABLE_AI
+    global CORS_ORIGIN, ENABLE_AI
     ap = argparse.ArgumentParser(description="本地项目看板（零依赖）")
     ap.add_argument("--port", type=int, default=8765, help="端口（默认 8765）")
     ap.add_argument("--host", default="127.0.0.1", help="绑定地址（默认仅本机回环）")
+    ap.add_argument(
+        "--cors-origin",
+        default=os.environ.get("KB_DASHBOARD_CORS_ORIGIN", "*"),
+        help="允许跨域访问 API 的前端源（默认 *）",
+    )
     ap.add_argument("--no-ai", action="store_true", help="关闭 AI 问答（纯静态看板）")
     args = ap.parse_args()
     ENABLE_AI = not args.no_ai
+    CORS_ORIGIN = args.cors_origin.strip() or "*"
 
     if not KB_DOCS.is_dir():
         print(f"[错误] 未找到 kb-docs 目录：{KB_DOCS}")
@@ -401,6 +449,7 @@ def main() -> int:
     url = f"http://{args.host}:{args.port}"
     print(f"\n✅ 看板已启动：{url}")
     print(f"   AI 问答：{'开启（需本地 Ollama）' if ENABLE_AI else '关闭'}")
+    print(f"   API CORS：{CORS_ORIGIN}")
     print("   按 Ctrl+C 停止\n")
     try:
         srv.serve_forever()
