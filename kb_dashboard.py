@@ -141,6 +141,9 @@ def projects_api_payload() -> dict:
     """返回稳定的公开 API 结构，避免前端依赖看板内部字段。"""
     projects = []
     for item in load_projects():
+        tech = item["tech"]
+        if isinstance(tech, str):
+            tech = [value.strip() for value in re.split(r"[,，/|·]+", tech) if value.strip()]
         projects.append({
             "name": item["title"],
             "status": item["status"],
@@ -148,7 +151,7 @@ def projects_api_payload() -> dict:
             "summary": item["summary"],
             "usability": item["usability"],
             "source": item["source"],
-            "tech": item["tech"],
+            "tech": tech,
             "todos": item["todos"],
             "metrics": {
                 "done": item["done"],
